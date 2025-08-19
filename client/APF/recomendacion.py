@@ -1,37 +1,39 @@
-import numpy as np
-from ..models.parametros_obstaculos import PARAMS  # radio / repulsión por tipo
-import client.APF.recomendacion as R
-# ───────────────────────────────────────────────────────────
+import numpy as np #para operaciones vectoriales
+from ..models.parametros_obstaculos import PARAMS  # k_repulsión y d0 de parametros_obtaculos
+#import client.APF.recomendacion as R  no se usa
+# ---------------------------------------------------
 #  PARÁMETROS GLOBALES (solo valores por defecto)
-# ───────────────────────────────────────────────────────────
+# ---------------------------------------------------
 Escala_sim = 1
-k_att      = 0.5
-# 💡 NUEVO: Modulación de la fuerza de atracción
-# Vamos a reducir la fuerza de atracción si estamos cerca de un obstáculo.
+
+k_att      = 1
 
 
+
+#NO UTILIZADOS, YA QUE CADA OBJETO TIENE SU K_REP Y D0 DEL parametros_obstaculos
 k_rep_base = 500
 d0_base    = 15
 
-v_max_def  = 5  # valor por defecto
+v_max_def  = 5  # valor por defecto, (si no se pasa v_max como argumento), pero no se utilizará
 
-# --- Parámetros fuerza tangencial (preventivo) ---
-k_tan      = 300.0
-d_pre      = 150.0
-angle_pre  = 10.0
-cos_pre    = np.cos(np.deg2rad(angle_pre))
+# --- Parámetros fuerza tangencial (preventivo) -----------
+k_tan      = 300.0 # cte. para la fuerza tangencial
+d_pre      = 150.0 # distancia (si d_eff < d_pre)
+angle_pre  = 10.0  # Umbral angular [grados]
+cos_pre    = np.cos(np.deg2rad(angle_pre)) # para pasar a radianes
 
-# --- Escape lateral (día 5) -----------------------
-D_lat       = 90   # [m] desplazamiento lateral total
+# --- Escape lateral  -----------------------   la idea es dejar el D_lat respecto a tipo de obstáculo, es solo escape de emergencia
+D_lat       = 90   # [m] distancia lateral total a recorrer en el escape
 safety_dist = 5    # [m] distancia de seguridad
 dt_step     = 0.5   # valor por defecto, el simulador lo sobreescribe    # [s] (tu simulador corre a 500 ms)
 
-# --- radios para activar planner vs alerta ---
+# --- radios para activar recomendacion vs alerta  solo avida sector donde esta el obstáculo---
 radio_alerta        = 400
 radio_recomendacion = 350
-# ───────────────────────────────────────────────────────────
 
-# ─── Helper: sector según ángulo relativo obstáculo–meta ───
+# --------------------------
+#  sector según ángulo relativo obstáculo–meta
+# --------------------------
 def _sector_from_angle(ang_deg):
     """ang_deg en [0,360). Devuelve 'frontal', 'izquierda', 'trasera' o 'derecha'."""
     if   45 <= ang_deg < 135:  return "izquierda"
@@ -40,59 +42,66 @@ def _sector_from_angle(ang_deg):
     else:                      return "frontal"
 
 
+
+# -------------------------
+#  PLANIFICADOR PRINCIPAL
+# -------------------------
 def calcular_recomendacion(
-    pos_usv,
-    pos_objetivo,
-    obstaculos,
+    pos_usv,        # (x, y) posición actual del USV en coordenadas internas
+    pos_objetivo,   # (x, y) posición de la meta en coordenadas internas
+    obstaculos,     # lista de (x_obs, y_obs, tipo) en coordenadas internas
     *,
-    v_max=v_max_def,
-    historial=None
+    v_max=v_max_def,  # velocidad máxima permitida (si no pasa, usa v_max_def)
+    historial=None    # no se usa aquí, pero queda para extender
 ):
     """
-    Planificador local con 5 etiquetas posibles:
-        AVANCE LIBRE / AVANCE ALERTA / AVANCE APF /
-        AVANCE PREVENTIVO / ESCAPE 
+    Salida: dict con 'rumbo', 'velocidad', 'maniobra' y diagnosticos.
+    Maniobras posibles:
+      - AVANCE LIBRE        (sin alerta)
+      - AVANCE ALERTA       (hay obstáculo en radio de alerta)
+      - AVANCE APF          (fuerzas atractiva+repulsiva)
+      - AVANCE PREVENTIVO   (tangencial activada)
+      - ESCAPE LATERAL      (emergencia ±90°)
     """
-     # --- estado persistente para PMA ---
-    #obst_prev     = getattr(calcular_recomendacion, "_obst_prev",    None)
-    #min_dist_prev = getattr(calcular_recomendacion, "_min_dist_prev", float("inf"))
-    #passed_pma    = getattr(calcular_recomendacion, "_passed_pma",   False)
-
+    # Magnitudes escalares, 
     norm_F_Att = 0.0
     norm_F_rep = 0.0
 
-    # ── persistente: índices de obstáculos ya pasados (PMA completado) ──
-    handled = getattr(calcular_recomendacion, "_handled", set())
-    # Dependen de la escala
+    # -- persistente: índices de obstáculos ya pasados (PMA completado) --
+    #handled = getattr(calcular_recomendacion, "_handled", set())
+
+
+    # SOLO POR SI PARAMS NO ENTREGA INFORMACIÓN PERO NO DEBERÍA PASAR.
     k_rep_global = k_rep_base
     d0_global    = d0_base * Escala_sim
 
-    # --------- Estado persistente del HOLD lateral ----------
-    lat_counter = getattr(calcular_recomendacion, "_lat_counter", 0)
-    lat_dir     = getattr(calcular_recomendacion, "_lat_dir",     None)
+    # --------- Estado del ESCAPE lateral (para mantenerlo activo en los pasos correspondientes)  ----------
+    lat_counter = getattr(calcular_recomendacion, "_lat_counter", 0) # pasos restantes
+    lat_dir     = getattr(calcular_recomendacion, "_lat_dir",     None) # dirección lateral (unitaria)
 
-    # (opcionales) contadores de distancia por modo
+    #  contadores de distancia por modo
     avance_apf        = getattr(calcular_recomendacion, "_avance_apf",        0.0)
     avance_preventivo = getattr(calcular_recomendacion, "_avance_preventivo", 0.0)
     avance_lat        = getattr(calcular_recomendacion, "_avance_lat",        0.0)
 
-    # Posiciones
+    # Posiciones a np.array para operar vectorialmente
     robot = np.array(pos_usv,      dtype=float)
     goal  = np.array(pos_objetivo, dtype=float)
 
-    # ======================================================
-    # 0) HOLD lateral activo → mantengo rumbo ±90° y salgo
-    # ======================================================
+    # --------------------------------------------------
+    # 0) ESCAPE lateral activo → mantengo rumbo ±90° y salgo del peligro
+    # ---------------------------------------------------
     if lat_counter > 0 and lat_dir is not None:
         rumbo = np.degrees(np.arctan2(lat_dir[1], lat_dir[0])) % 360
 
+        # es como el temporizador del avance lateral para poder llegar a 0.
         lat_counter -= 1
         calcular_recomendacion._lat_counter = lat_counter
 
         # acumular distancia lateral estimada
         avance_lat += v_max * dt_step
         calcular_recomendacion._avance_lat = avance_lat
-
+         # En ESCAPE no se recalculan fuerzas; solo se mantiene el rumbo lateral
         return {
             "rumbo"           : round(rumbo, 1),
             "velocidad"       : round(v_max, 2),
@@ -103,40 +112,45 @@ def calcular_recomendacion(
             "distancia_minima": None,
             "pos_min_iter"    : None,
             "obst_min_id"     : None,
-            # nuevos campos (None porque aquí no recalculamos)
+            # (no se recalcula aquí), porque en escape lateral solo se estan consumiendo los pasos
             "sector_min"    : None,
             "ang_min"       : None,
             "PMA"           : None,
             "R_geo_min"     : None,
         }
 
-    # ======================================================
+    # --------------------------------------------------------
     # 1) Escaneo de obstáculos → decidir si activamos planner
-    # ======================================================
-    alerta, recomendar = None, False
-    distancia_min = float("inf")
-    obst_min_id   = None
-    pos_min_iter  = None
+    # --------------------------------------------------------
+    alerta, recomendar = None, False  # 'alerta' = solo aviso; 'recomendar' = activar recomendacion
+    distancia_min = float("inf")      # mínima distancia 
+    obst_min_id   = None              # índice del obstáculo más cercano
+    pos_min_iter  = None              # posición del robot al evaluar esa mínima
 
     # Para registrar ángulo/sector y PMA del obstáculo más cercano
-    ang_min    = None
-    sector_min = None
-    R_geo_min  = 0.0
+    ang_min    = None  # ángulo relativo obstáculo–meta (grados)
+    sector_min = None  # frontal/izquierda/trasera/derecha
+    R_geo_min  = 0.0  # radio físico del obstáculo más cercano 
 
     # Bucle para encontrar el obstáculo más cercano y decidir si se activa el APF
     for idx, (x_obs, y_obs, tipo) in enumerate(obstaculos):
-        if idx in handled:
-            continue     # Distancia al centro
+        #if idx in handled:
+        #    continue     # Distancia al centro
+        # Distancia  al centro del obstáculo
         d = np.linalg.norm(robot - (x_obs, y_obs))
 
-        # Cálculo único de ángulo y sector para ESTE obstáculo
+        # Vectores hacia obs y hacia la meta (para ángulo relativo)
         vec_obs  = np.array([x_obs, y_obs]) - robot
         vec_goal = goal - robot
+
+        # Ángulo relativo (obs vs goal), en grados [0, 360)
         ang_tmp = (np.degrees(np.arctan2(vec_obs[1], vec_obs[0])) -
                    np.degrees(np.arctan2(vec_goal[1], vec_goal[0]))) % 360
+        
+        # Sector según el ángulo relativo
         sector_tmp = _sector_from_angle(ang_tmp)
 
-        # Si es el más cercano, guardamos info
+        # Si es el más cercano, guardamos información
         if d < distancia_min:
             distancia_min = d
             obst_min_id   = idx
@@ -145,51 +159,24 @@ def calcular_recomendacion(
             sector_min    = sector_tmp
             R_geo_min     = PARAMS.get(tipo, {}).get("radio_geo", 0.0)
 
-        # Bloque alerta original (usamos sector_tmp)
+        #  Si está en el radio de alerta → generar texto de advertencia
         if radio_recomendacion <= d < radio_alerta:
             alerta = f"⚠️ Obstáculo a {d:.1f} m, sector {sector_tmp}"
-
+        # Si entra en el radio de recomendación → activar recomendación
         if d < radio_recomendacion:
             recomendar = True
 
     # PMA (clearance real al borde)
-    PMA = distancia_min - R_geo_min if np.isfinite(distancia_min) else None
-    """
-    # ── Detectar cambio de obstáculo o paso del PMA ──
-    if obst_min_id != obst_prev:
-        # Nuevo obstáculo más cercano → reinicio
-        min_dist_prev = distancia_min
-        passed_pma    = False
-    else:
-        if distancia_min <= min_dist_prev:
-            # seguimos acercándonos
-            min_dist_prev = distancia_min
-        else:
-            # la distancia empieza a aumentar → hemos pasado el PMA
-            passed_pma = True
+    PMA = distancia_min - R_geo_min if np.isfinite(distancia_min) else None # np.isfinite(x), filtro de seguridad para no calcular distancias con valores infinitos o inválidos. , devuelve True si x es un número finito y Devuelve False si x = np.inf, -np.inf o NaN
 
-                # ── marcamos este obstáculo como “evasión completada” ──
-            if obst_min_id not in handled:
-                handled.add(obst_min_id)
-                calcular_recomendacion._handled = handled
-
-                # Guardar estados para la próxima llamada
-    calcular_recomendacion._obst_prev      = obst_min_id
-    calcular_recomendacion._min_dist_prev  = min_dist_prev
-    calcular_recomendacion._passed_pma     = passed_pma
-    """
-    # ======================================================
+    # ------------------------------------------------------
     # 2) MODO LIBRE / ALERTA (no se usa APF), directo a la meta
-    # ======================================================
-    #si la variable es false, ningún obtáculo esta cerca, USV directo a la meta
-        # Si ya pasamos el PMA, anulamos la recomendación para volver directo
-    #if passed_pma:
-    #    recomendar = False
-    
+    # ------------------------------------------------------
+    # Si no hay obstáculo, vuelas directo a la meta
     if not recomendar:
-        dir_unit = (goal - robot) / np.linalg.norm(goal - robot)
-        rumbo    = np.degrees(np.arctan2(dir_unit[1], dir_unit[0])) % 360
-        maniobra = "AVANCE ALERTA" if alerta else "AVANCE LIBRE"
+        dir_unit = (goal - robot) / np.linalg.norm(goal - robot) # Dirección unitaria hacia la meta
+        rumbo    = np.degrees(np.arctan2(dir_unit[1], dir_unit[0])) % 360 # Rumbo en grados [0, 360)
+        maniobra = "AVANCE ALERTA" if alerta else "AVANCE LIBRE" # Etiqueta según si había alerta en el radio 
         return {
             "rumbo"           : round(rumbo, 1),
             "velocidad"       : round(v_max, 2),
@@ -198,7 +185,6 @@ def calcular_recomendacion(
             "alerta"          : alerta,
             "force_total"     : np.array([0.0, 0.0]),
             "norm_F"          : 0.0,
-            # nuevos
             "sector_min"    : sector_min,
             "ang_min"       : None if ang_min is None else round(ang_min, 1),
             "PMA"           : None if PMA is None else round(PMA, 2),
@@ -213,26 +199,23 @@ def calcular_recomendacion(
     # ======================================================
     # 3) PLANIFICADOR LOCAL, se busca (Debilitar(modular) la Fatt si el USV esta muy cerca del obs, mejor evasion
     # ======================================================
-    #dist_modulacion = 60.0 # Umbral para empezar a reducir la fuerza (ajustable)
-    #escala_att = 1.0  # Por defecto, la fuerza de atracción es completa.
-    #if distancia_min < dist_modulacion:
-        # Escala la fuerza linealmente: 0 si estás encima del obstáculo, 1 si estás en el límite.
-    #    escala_att = (distancia_min / dist_modulacion)
+
         
     # 3‑a) Atractiva (Ahora escalada)
     F_Att = k_att * (goal - robot)
     #F_att = escala_att * k_att * (goal - robot) 
     norm_F_Att = float(np.linalg.norm(F_Att)) #magnitud escalar
     print(f"‖F_Att‖ = {np.linalg.norm(F_Att):8.3f}")
-    # 3‑b) Repulsiva por tipo (con radio inflado)
+
+    # 3‑b) Repulsiva por tipo 
     F_rep = np.zeros(2)
     norm_F_rep = 0.0
-    for x_obs, y_obs, tipo in obstaculos:
 
-        params_i = PARAMS.get(tipo, {})
-        Rg     = params_i.get('radio_geo', 0.0)
-        d0_i   = params_i.get('radio',     d0_global)  # Radio de influencia
-        krep_i = params_i.get('repulsion', k_rep_global)
+    for x_obs, y_obs, tipo in obstaculos:
+        params_i = PARAMS.get(tipo, {})     # fila de parámetros por tipo
+        Rg     = params_i.get('radio_geo', 0.0) # radio físico (borde real)
+        d0_i   = params_i.get('radio',     d0_global)  # Radio de influencia si no hay del parametros
+        krep_i = params_i.get('repulsion', k_rep_global) # constante de repulsión si nohay de parametros
         
         vec = robot - np.array((x_obs, y_obs))
         d   = np.linalg.norm(vec)
@@ -252,46 +235,49 @@ def calcular_recomendacion(
     norm_F_rep = float(np.linalg.norm(F_rep)) #magnitud escalar
            # F_rep += krep_i * ((1/d_eff) - (1/d0_i)) / d_eff**2 * (vec / d)
     print(f"‖F_rep‖ = {np.linalg.norm(F_rep):8.3f}")
+
     # 3‑c) Tangente preventiva (usa d_eff)
     F_tan = np.zeros(2)
     if np.linalg.norm(F_Att) > 1e-6:
-        hdir = F_Att / np.linalg.norm(F_Att)
+        hdir = F_Att / np.linalg.norm(F_Att)  # heading hacia meta (unitario)
         for x_obs, y_obs, tipo in obstaculos:
             vec = robot - np.array((x_obs, y_obs))
             d   = np.linalg.norm(vec)
             Rg  = PARAMS.get(tipo, {}).get('radio_geo', 0.0)
             d_eff = max(1e-3, d - Rg)
 
-            if d_eff < d_pre:
-                u_r    = vec / d
-                cos_th = np.dot(hdir, -u_r)
-                if cos_th > cos_pre:
-                    gamma = (cos_th - cos_pre) / (1 - cos_pre)
-                    beta  = (d_pre - d_eff) / d_pre
-                    k_eff = k_tan * beta * gamma
-                    u_t   = np.array([-u_r[1], u_r[0]])
+            if d_eff < d_pre:  # sólo si estoy bastante cerca
+                u_r    = vec / d    # radial (unitario) desde obs → robot
+                cos_th = np.dot(hdir, -u_r)  # coseno del ángulo entre "hacia meta" y "hacia obs"
+                if cos_th > cos_pre:         # "obstáculo por delante": está alineado con rumbo a meta
+                    gamma = (cos_th - cos_pre) / (1 - cos_pre)  # alineamiento
+                    beta  = (d_pre - d_eff) / d_pre             # cercanía
+                    k_eff = k_tan * beta * gamma                # cte efectiva
+                    # vector tangencial (perp. a u_r); sentido inicial
+                    u_t   = np.array([-u_r[1], u_r[0]])      
+                    # Elegir el sentido que "favorezca" avance a la meta
                     if np.dot(u_t, goal - robot) < 0:
                         u_t = -u_t
                     F_tan = k_eff * u_t
-                    break
+                    break   # con el primer obstáculo más cercano al peligro actuará
 
-    # 3‑d) Fuerza total
+    # 3‑d) Fuerza total  y su calculo de magnitud
     F_tot  = F_Att + F_rep + F_tan
     norm_F = np.linalg.norm(F_tot)
 
-    # ======================================================
+    # --------------------------------------------------
     # 4) Predicción → activar escape lateral (solo modo APF)
-    # ======================================================
+    # ---------------------------------------------------
     if norm_F > 1e-6:
-        direction_pred = F_tot / norm_F
-        speed_pred     = min(v_max, norm_F)
+        direction_pred = F_tot / norm_F       # rumbo previsto
+        speed_pred     = min(v_max, norm_F)   # velocidad prevista
     else:
         direction_pred = np.zeros(2)
         speed_pred     = 0.0
 
-    next_pos = robot + direction_pred * speed_pred * dt_step
+    next_pos = robot + direction_pred * speed_pred * dt_step  # posición prevista a dt_step
 
-    # Distancia efectiva al obstáculo (restando radio_geo)
+    # Distancia efectiva al obstáculo = distancia al centro - radio_geo
     def dist_eff(p, x, y, t):
         Rg = PARAMS.get(t, {}).get('radio_geo', 0.0)
         return np.linalg.norm(p - np.array((x, y))) - Rg
@@ -304,22 +290,25 @@ def calcular_recomendacion(
 
     if activar_escape:
         # ±90° respecto a la dirección a la meta
-        goal_dir = goal - robot
+        goal_dir = goal - robot    
         goal_dir /= np.linalg.norm(goal_dir)
 
-        u_up = np.array([-goal_dir[1],  goal_dir[0]])
-        u_dn = -u_up
-
+        u_up = np.array([-goal_dir[1],  goal_dir[0]])  # +90°
+        u_dn = -u_up                                   # -90°
+        # Score: penaliza (como un costo artifical) direcciones cuya next_pos queden muy cerca del borde (1/dist)
         def score(u):
             p = robot + u * v_max * dt_step
             return sum(1 / max(1e-6, dist_eff(p, x, y, t)) for x, y, t in obstaculos)
-
+        
+        # se Elige la lateralidad con menor "riesgo"
         lat_dir = u_up if score(u_up) < score(u_dn) else u_dn
 
+        #cuántos pasos mantener el lateral para cubrir D_lat
         lat_steps = int(D_lat / (v_max * dt_step))
         calcular_recomendacion._lat_counter = max(lat_steps - 1, 0)  # 1er paso lo da el sim
         calcular_recomendacion._lat_dir     = lat_dir
-
+        
+        # Rumbo de ese lateral
         rumbo = np.degrees(np.arctan2(lat_dir[1], lat_dir[0])) % 360
 
         avance_lat += v_max * dt_step
@@ -344,9 +333,9 @@ def calcular_recomendacion(
 
         }
 
-    # ======================================================
+    # -------------------------------------------------
     # 5) Maniobra normal (APF o PREVENTIVO)
-    # ======================================================
+    # -------------------------------------------------
     if np.any(F_tan):
         direction = F_tot / norm_F
         maniobra  = "AVANCE PREVENTIVO"
@@ -354,7 +343,7 @@ def calcular_recomendacion(
         direction = F_tot / norm_F
         maniobra  = "AVANCE APF"
 
-    # ───────── Inercia ─────────
+    # Inercia, en esta ocación no se utiliza por temas de trabajos se buscaba suavizar el rumbo pero se mantendrá desactivado
     alpha = 0
     prev = getattr(calcular_recomendacion, "_dir_prev", None)
     if prev is not None and alpha > 0 and np.linalg.norm(prev) > 1e-6:
@@ -362,7 +351,7 @@ def calcular_recomendacion(
         direction /= np.linalg.norm(direction)
     calcular_recomendacion._dir_prev = direction
     # ───────────────────────────
-
+    # Rumbo final y distancia mínima en metros (si aplicara escala)
     rumbo = np.degrees(np.arctan2(direction[1], direction[0])) % 360
     distancia_min_m = distancia_min * Escala_sim if np.isfinite(distancia_min) else None
 
