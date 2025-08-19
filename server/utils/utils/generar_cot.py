@@ -11,7 +11,7 @@ def generar_mensaje_cot(nombre_emisor): #Función que recibe el nombre del emiso
             obstaculo1="-33.025874, -71.610697"
             tipo_obstaculo1="Boya"
             obstaculo2="-33.028270, -71.612834"
-            tipo_obstaculo2="Vessel"
+            tipo_obstaculo2="Buque"
             obstaculo3="-33.030139, -71.616662"
             tipo_obstaculo3="Roca"
           
