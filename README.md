@@ -1,10 +1,10 @@
 # USV-APF-QML-CoT-TESIS
-Simulador de un USV (vehículo de superficie no tripulado) con **planificador local APF**, **GUI en QML** y manejo de **coordenadas reales** (WGS84→UTM→XY interno). El sistema corre en dos procesos: **Servidor** (datos) y **Cliente** (interfaz QML/simulador/recomendación).
+Simulador de un USV (vehículo de superficie no tripulado) con **planificador local APF**, **GUI en QML** y manejo de **coordenadas reales** (WGS84→UTM→XY interno). El sistema corre en dos procesos: **Servidor** (datos) y **Cliente** (interfaz QML / simulador / recomendación).
 
 ---
 
-##  ¿Qué incluye?
-- **Servidor** (`server/utils`): **emite** la posición inicial del USV, el punto final (meta) y la lista de obstáculos **en coordenadas GPS** vía socket. 
+## ¿Qué incluye?
+- **Servidor** (`server/utils`): **emite** la posición inicial del USV, el punto final (meta) y la lista de obstáculos **en coordenadas GPS** vía socket.  
 - **Cliente** (`client`): **recibe** los datos del servidor, realiza las **conversiones WGS84→UTM→XY interno**, ejecuta el **planificador APF** (incluye modos preventivo y escape) y presenta la **GUI en QML**.
 - **Distancias reales**: simulación en metros, con radios de alerta/activación configurables en el cliente.
 - **Logs**: el **Cliente** muestra por consola las conversiones y fuerzas del APF; el **Servidor** muestra estado de escucha y conexiones.
@@ -15,11 +15,9 @@ Simulador de un USV (vehículo de superficie no tripulado) con **planificador lo
 - **Python 3.10 – 3.13**
 - Git (opcional, para clonar)
 - Sistema operativo: **Windows**, **macOS**, **Linux** o **Raspberry Pi**
-- Repositorio clonado
-
 ---
 
-## Instalación (una sola vez)
+## Instalación 
 
 ### Windows (PowerShell)
 ```powershell
@@ -48,7 +46,7 @@ pip install -r requirements.txt
 
 Se necesitan **dos terminales**: una para el **Servidor** y otra para el **Cliente**.
 
-### 1) Inico del **Servidor** (Terminal A)
+### 1) Iniciar el **Servidor** (Terminal A)
 Debe ejecutarse desde `server/utils`.
 
 **Windows**
@@ -98,6 +96,8 @@ python3 -m client.main_gui
 ### 3) Detener
 En cada terminal, presiona **Ctrl + C**.
 
+---
+
 ### 4) Consideraciones y visualización
 
 - **Archivos .npy (trayectoria y obstáculos):**  
@@ -106,7 +106,8 @@ En cada terminal, presiona **Ctrl + C**.
   # Desde la raíz del repo
   python graficador.py    # o 'python3 graficador.py'
   ```
-- **Fuerzas atractivas/repulsivas (runXXX.csv):**  
+
+- **Fuerzas atractivas/repulsivas (runXXXXX.csv):**  
   Para verificar el comportamiento de las fuerzas, carga el archivo **runXXX.csv** en:
   ```bash
   python graficofuerzas.py
@@ -120,14 +121,14 @@ En cada terminal, presiona **Ctrl + C**.
   ```bash
   python generar_mapas_multiples.py
   ```
-  (El script toma los JSON actuales para crear el/los mapa/s.)
+  (El script toma los JSON actuales para crear el mapa.)
 
 - **Persistencia de simulaciones:**  
   Las simulaciones se **guardan** solo si el **USV alcanza la meta** (condición de éxito). Si no llega, no se genera/sobrescribe el set completo de resultados.
 
 ---
 
-## 🗂️ Estructura del proyecto (resumen)
+## Estructura del proyecto
 ```text
 TESIS_GIT/
 ├─ client/
@@ -143,40 +144,43 @@ TESIS_GIT/
 │  ├─ ui/
 │  │  └─ interface.qml
 │  ├─ utils/
-│  │  ├─ graficador.py
-│  │  
-│  ├─ main_gui.py          # punto de entrada GUI (ejecutar como módulo)
-│  └─ debug_cli.py         # punto de entrada consola (opcional)
-├─ server/                 # server externo (tal cual fue recibido)
+│  │  └─ graficador.py
+│  ├─ main_gui.py          # Punto de entrada GUI (ejecutar como módulo)
+│  └─ debug_cli.py         # Punto de entrada consola (opcional)
+├─ server/
 │  └─ utils/
-│     ├─ main.py           # punto de entrada del server (ejecutar desde esta carpeta)
+│     ├─ main.py           # Punto de entrada del server (ejecutar desde esta carpeta)
 │     ├─ handlers/
 │     │  ├─ nmea_handler.py
 │     │  └─ socket_handler.py
 │     └─ utils/
 │        ├─ servidor_ip.py
 │        └─ generar_cot.py
-└─ graficofuerzas.py
-└─ generar_mapas_multiples.py
+├─ graficofuerzas.py
+├─ generar_mapas_multiples.py
 ├─ requirements.txt
 └─ README.md
+```
 
 ---
 
-##  Parámetros y configuración
+## Parámetros y configuración
 - **Puerto/host**: definidos en el servidor (por defecto `0.0.0.0:65432`).
-- **Entradas** (inicio/obstáculos/meta): el servidor las consume desde las fuentes configuradas en `server/utils/main.py`.
-- **Planificador APF**: constantes variables `k_att` (recomendacion.py), `k_rep` y `d0`(parametros_obstaculos.py), los demás parámetros se dejarán constantes respecto a la tabla del trabajo (Tabla 5.9: Configuraciones recomendadas por tipo de obstáculo y velocidad).
-- Cabe destacar que todos los parámetros pueden ser variados respecto al uso que se requiera, sin embargo es importante considerar el equilibrio de los parámetros en especial, los parámetros que participan en el planificador local APF. 
+- **Entradas** (inicio / obstáculos / meta): el servidor las consume desde las fuentes configuradas en `server/utils/main.py`.
+- **Planificador APF**: constantes variables `k_att` (`recomendacion.py`), `k_rep` y `d0` (`parametros_obstaculos.py`).  
+  Los demás parámetros se dejarán constantes respecto a la tabla del trabajo (Tabla 5.9: Configuraciones recomendadas por tipo de obstáculo y velocidad).
+- Todos los parámetros pueden ser variados según el uso, pero es importante mantener equilibrio entre ellos, en especial los que participan en el planificador local APF. 
+
 ---
 
-##  Prueba rápida 
-1. Iniciar **Servidor** (Terminal A) → verifica “servidor escuchando…”.
-2. Iniciar **Cliente** (Terminal B) → verifica “Conexión establecida…”.
+## Prueba rápida 
+1. Iniciar **Servidor** (Terminal A) → verifica “servidor escuchando…”.  
+2. Iniciar **Cliente** (Terminal B) → verifica “Conexión establecida…”.  
 3. Observa logs de WGS84→UTM y fuerzas APF.  
+
 ---
 
-##  Problemas comunes (y soluciones)
+## Problemas comunes (y soluciones)
 
 ### 1) *“ModuleNotFoundError / PySide6 / pyproj no encontrado”*
 Instala dependencias dentro del entorno virtual:
@@ -185,7 +189,7 @@ pip install -r requirements.txt
 ```
 
 ### 2) *“qt.qpa.plugin: Could not load the Qt platform plugin ‘windows’/‘xcb’ …”*
-- Asegúrate de estar en el **.venv**.
+- Asegúrate de estar en el **.venv**.  
 - Reinstala PySide6:
 ```bash
 pip uninstall -y PySide6 && pip install PySide6
@@ -193,21 +197,12 @@ pip uninstall -y PySide6 && pip install PySide6
 - En Linux, instala dependencias del sistema (ej. `libxcb`).
 
 ### 3) *“OSError: [Errno 98] Address already in use” (puerto en uso)*
-- Cierra procesos previos (Ctrl+C).
-- O usa otro puerto en el servidor (edita `main.py`).
+- Cierra procesos previos (Ctrl+C).  
+- O usa otro puerto en el servidor (edita `main.py`).  
 
 ### 4) *El cliente no conecta*
-- Verifica que el servidor diga “escuchando…”.
-- Revisa IP/puerto del servidor en el cliente.
----
----
-
-## 🧾 Comandos Git útiles
-```bash
-git add .
-git commit -m "Docs: README con pasos de instalación y uso"
-git push
-```
+- Verifica que el servidor diga “escuchando…”.  
+- Revisa IP/puerto del servidor en el cliente.  
 
 ---
 
@@ -217,14 +212,5 @@ git push
 Sí: una para el **Servidor** y otra para el **Cliente**.
 
 **¿Dónde veo las fuerzas APF y conversiones?**  
-En la **consola** del cliente y/o servidor .
-
-**¿Puedo cambiar k_att, k_rep, d0, radios?**  
-Sí, ajusta las constantes en el código correspondiente (cliente/servidor).
-
----
-
-## Autor
-- **Nicolás Lavados** — Ingeniería Naval Electrónica (tesis USV)
-
+En la **consola del Cliente** (el Servidor solo muestra estado y conexiones).
 
