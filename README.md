@@ -180,31 +180,6 @@ TESIS_GIT/
 
 ---
 
-## Problemas comunes (y soluciones)
-
-### 1) *“ModuleNotFoundError / PySide6 / pyproj no encontrado”*
-Instala dependencias dentro del entorno virtual:
-```bash
-pip install -r requirements.txt
-```
-
-### 2) *“qt.qpa.plugin: Could not load the Qt platform plugin ‘windows’/‘xcb’ …”*
-- Asegúrate de estar en el **.venv**.  
-- Reinstala PySide6:
-```bash
-pip uninstall -y PySide6 && pip install PySide6
-```
-- En Linux, instala dependencias del sistema (ej. `libxcb`).
-
-### 3) *“OSError: [Errno 98] Address already in use” (puerto en uso)*
-- Cierra procesos previos (Ctrl+C).  
-- O usa otro puerto en el servidor (edita `main.py`).  
-
-### 4) *El cliente no conecta*
-- Verifica que el servidor diga “escuchando…”.  
-- Revisa IP/puerto del servidor en el cliente.  
-
----
 
 ## IMPORTANTE
 
