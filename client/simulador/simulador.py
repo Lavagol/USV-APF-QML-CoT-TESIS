@@ -2,123 +2,127 @@
 - Este simulador escucha señales Qt (posiciónUSV_real, metaActualizada_real, obstaculosActualizados)
   que llegan desde el SocketHandler.
 - Convierte todo a un sistema interno XY relativo al origen (0,0).
-- Cada tick del QTimer ejecuta avanzar():
-    * Llama a calcular_recomendacion().
+- Cada iteración del QTimer ejecuta avanzar():
+    * Llama a calcular_recomendacion(), algoritmo de PLANIFICADOR LOCAL Y AVANCE LIBRE.
     * Mueve el USV.
     * Actualiza GUI, métricas y logs.
 """
 
-from PySide6.QtCore import QObject, QTimer, Signal, QPointF, QDateTime
-import numpy as np
-import csv, json
-from pyproj import Transformer
+from PySide6.QtCore import QObject, QTimer, Signal, QPointF, QDateTime # Importa clases Qt necesarias
+import numpy as np # Librería para operaciones matemáticas y vectoriales
+import csv, json  # Para guardar datos en archivos CSV y JSON
+from pyproj import Transformer  # Para transformar coordenadas UTM <-> WGS84
 
-# ⬇️ IMPORTO el módulo para poder sincronizar dt si quiero
-from client.APF import recomendacion as reco_mod
-from client.APF.recomendacion import calcular_recomendacion
+#  IMPORTO el módulo para poder sincronizar dt si quiero
+from client.APF import recomendacion as reco_mod # Importa el módulo completo para modificar dt_step
+from client.APF.recomendacion import calcular_recomendacion # Importa directamente la función de recomendación (importante)
 
 
-class SimuladorAPF(QObject):
-    alertaActualizada    = Signal(str)
-    actualizarObstaculos = Signal(list)
-    posicionInterna      = Signal(float, float)
-    metaInterna          = Signal(float, float)
-    tiempoActualizado    = Signal(float)
+class SimuladorAPF(QObject):   # Clase de QObject para usar señales QT
+    # Definición de señales Qt para comunicar con la interfaz QML
+    alertaActualizada    = Signal(str)             # Señal que envía mensajes de estado
+    actualizarObstaculos = Signal(list)            # Señal para recibir obstáculos desde fuera
+    posicionInterna      = Signal(float, float)    # Señal para reportar posición interna (x,y)
+    metaInterna          = Signal(float, float)    # Señal para reportar la meta interna
+    tiempoActualizado    = Signal(float)           # Señal para reportar tiempo transcurrido
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None):  #Inicia  el objeto Qt.
         super().__init__(parent)
 
-        # ---- Config inicial ----
+        # ---- Config inicial ---- Velocidad del USV, v_max se le pasa al planner como límite de avance por iteración.
         self.v_knots       = 15.0
         self.v_max         = self.v_knots * 0.514444
 
         # ---- Estado general ----
-        self._origin_raw   = None
-        self._origin_fijado = False
-        self._meta_fijada   = False
-        self._start_time    = None
-        self._dist_inicial  = None
+        self._origin_raw   = None      # Guarda origen UTM real (x0,y0)
+        self._origin_fijado = False    # Bandera o flag para saber si origen ya fue fijado
+        self._meta_fijada   = False    # Bandera o flag para saber si la meta ya fue fijada
+        self._start_time    = None     # Hora de inicio de la simulación
+        self._dist_inicial  = None     # Distancia inicial entre origen y meta
 
-        self.robot_pos   = QPointF(0.0, 0.0)
-        self.goal_pos    = None
-        self.obstaculos  = []      # [(QPointF, tipo), ...]
+        # Posiciones y estado dinámico
+        self.robot_pos   = QPointF(0.0, 0.0)   # Posición actual del USV en coordenadas internas
+        self.goal_pos    = None                # Posición de la meta (interna)
+        self.obstaculos  = []                  # Lista de obstáculos [(QPointF, tipo), ...]
         self.hist_pos    = []      # historial corto para suavizar
 
         # ---- Trayectoria y logs ----
-        self.trayectoria = []
-        self.log         = []
+        self.trayectoria = []   # Guarda todos los puntos de la trayectoria interna
+        self.log         = []   # Logs adicionales opcionales
 
         # ---- Timer ----
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.avanzar)
-        self.actualizarObstaculos.connect(self._on_obstaculos_actualizados)
+        self.timer = QTimer(self)                # Temporizador Qt
+        self.timer.timeout.connect(self.avanzar) # Llama a avanzar() en cada tick
+        self.actualizarObstaculos.connect(self._on_obstaculos_actualizados)  
+        # Conecta la señal de obstáculos al método interno que actualiza la lista
 
         # ---- Métricas para análisis ----
-        self.run_id      = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
-        self.dist_total  = 0.0
-        self.dist_apf    = 0.0
-        self.dist_pre    = 0.0
-        self.dist_escape = 0.0
-        self.n_escape    = 0
-        self.max_dpsi    = 0.0
-        self._rumbo_prev = None
-        self._pos_prev   = None
+        self.run_id      = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss") #como quedará guardado el archivo .csv
+        self.dist_total  = 0.0      # Distancia total recorrida
+        self.dist_apf    = 0.0      # Distancia recorrida en modo APF
+        self.dist_pre    = 0.0      # Distancia recorrida en modo preventivo
+        self.dist_escape = 0.0      # Distancia recorrida en escape lateral
+        self.n_escape    = 0        # Número de escapes laterales realizados
+        self.max_dpsi    = 0.0      # Máximo cambio de rumbo registrado
+        self._rumbo_prev = None     # Rumbo anterior (para calcular variaciones)
+        self._pos_prev   = None     # Posición anterior (para calcular distancias paso a paso)
 
-        self.PMA_min    = float("inf")
-        self.step_log   = []
-        self.last_summary = None
-        self.min_pos    = []   # [(id_obs, x_min, y_min, d_min), ...]
+        self.PMA_min    = float("inf")  # Clearance mínimo (distancia mínima a obstáculo)
+        self.step_log   = []            # Registro de datos por cada paso del simulador
+        self.last_summary = None        # Resumen final de la corrida
+        self.min_pos    = []   # [(id_obs, x_min, y_min, d_min), ...]; guarda posiciones de mínima distancia a obstáculos
 
     # ==========================================================
     #  Origen y Meta
     # ==========================================================
 
-    def fijar_origin(self, x0, y0):
-        """Fija el origen UTM real → (0,0) interno."""
-        self._origin_raw = (x0, y0)
-        if not self._origin_fijado:
-            self.robot_pos      = QPointF(0.0, 0.0)
-            self._origin_fijado = True
+    def fijar_origin(self, x0, y0): 
+        """Fija el origen UTM real → (0,0) interno"""
+        self._origin_raw = (x0, y0) # Guarda coordenadas reales como origen base
+        if not self._origin_fijado: # Solo se fija la primera vez
+            self.robot_pos      = QPointF(0.0, 0.0) #se pone el usv en el 0,0
+            self._origin_fijado = True #marcar que ya está definido
             print(f"🌐 Origin={self._origin_raw} → interna (0,0)")
-            self._maybe_start()
+            self._maybe_start()   #si hay meta se inicia el simulador
 
     def fijar_meta(self, x_meta, y_meta):
         """Convierte meta a coordenadas internas y arranca si corresponde."""
-        if self._meta_fijada:
+        if self._meta_fijada:   # Si ya estaba fijada, no hace nada, true si la meta ya está definida
             return
         self._meta_fijada = True
 
-        ox, oy = self._origin_raw
+        ox, oy = self._origin_raw # Origen real en UTM, convierte coordenada X em meta internay al igual que el Y
         xi = (x_meta - ox)
         yi = (y_meta - oy)
 
-        self.goal_pos     = QPointF(xi, yi)
-        self._start_time  = QDateTime.currentDateTime()
-        self._dist_inicial = np.hypot(xi, yi)
+        self.goal_pos     = QPointF(xi, yi)   #GUardar meta coord. internas
+        self._start_time  = QDateTime.currentDateTime() #hora inicio simulación
+        self._dist_inicial = np.hypot(xi, yi) #distnacia inicial origen - meta 
 
         print(f"🏁 Meta interna → X={xi:.1f}, Y={yi:.1f}")
         self.metaInterna.emit(xi, yi)
         self._maybe_start()
 
     def finalizar__llegada(self):
+        # Tiempo transcurrido desde inicio
         elapsed_ms  = self._start_time.msecsTo(QDateTime.currentDateTime())
-        elapsed_min = elapsed_ms / 1000.0 / 60.0
-        teoric_min  = self._dist_inicial / 1852.0 / self.v_knots * 60
+        elapsed_min = elapsed_ms / 1000.0 / 60.0 # conversión de ms a min
+        teoric_min  = self._dist_inicial / 1852.0 / self.v_knots * 60 # Tiempo teórico (en min) a la velocidad establecida
 
-        self.robot_pos = QPointF(self.goal_pos)
+        self.robot_pos = QPointF(self.goal_pos) #USV en la meta
         self.alertaActualizada.emit(
-        f"✅ Llegó en {elapsed_min:.1f} min (teórico {teoric_min:.1f})"
+        f"✅ Llegó en {elapsed_min:.1f} min (teórico {teoric_min:.1f})" #para cuando termine la simulación
     )
-        self.timer.stop()
-        self._guardar_logs()
+        self.timer.stop()   #deteneoms el simuladora y guardamos resultados
+        self._guardar_logs() 
     
     
     
     def _maybe_start(self):
         """Inicia el timer sólo si hay origen y meta definidos."""
         if self._origin_fijado and self.goal_pos and not self.timer.isActive():
-            print(f"▶️ Iniciando APF @ {self.v_knots} kn")
-            self.timer.start(41)  # ms  (ajusta aquí si quieres 500/100/… Hz)
+            print(f"▶️ Iniciando APF @ {self.v_knots} kn")  # Mensaje de inicio, en el temrinal
+            self.timer.start(41)  # ms  (41 aproximado a 24 hz, para buscar una simulación más continua.
 
     # ==========================================================
     #   Obstáculos
@@ -134,21 +138,21 @@ class SimuladorAPF(QObject):
             print(f"🛑 Obstáculo de tipo '{tipo}' en interna → ({pt.x():.1f},{pt.y():.1f})")
 
     # ==========================================================
-    #   Tick del simulador
+    #   cada iteración del simulador
     # ==========================================================
 
     def avanzar(self):
-        # 1) dt del simulador (seg)
+        # 1) dt del simulador (seg por iteración)
         dt = self.timer.interval() / 1000.0
-        # opcional: sincronizar el planner
-        reco_mod.dt_step = dt
+        # sincronizar el planificador APF
+        reco_mod.dt_step = dt   # sincronización del dt del planificador con el simulador
 
         # 2) Distancia a meta ANTES de mover
         dx = self.goal_pos.x() - self.robot_pos.x()
         dy = self.goal_pos.y() - self.robot_pos.y()
-        dist = np.hypot(dx, dy)
+        dist = np.hypot(dx, dy) #dist. actual a la meta
 
-        # Emito posición actual al QML (para no perder el print externo)
+        # Emito posición actual al QML o al GUI(para no perder el print externo)
         self.posicionInterna.emit(self.robot_pos.x(), self.robot_pos.y())
 
         # 3) Chequeo de llegada (snap final si ya está encima)
@@ -158,14 +162,14 @@ class SimuladorAPF(QObject):
 
         # 4) Planificador
         reco = calcular_recomendacion(
-            (self.robot_pos.x(), self.robot_pos.y()),
-            (self.goal_pos.x(),  self.goal_pos.y()),
-            [(pt.x(), pt.y(), tipo) for pt, tipo in self.obstaculos],
-            historial=self.hist_pos,
-            v_max=self.v_max
+            (self.robot_pos.x(), self.robot_pos.y()),       # Posición actual
+            (self.goal_pos.x(),  self.goal_pos.y()),        # Meta
+            [(pt.x(), pt.y(), tipo) for pt, tipo in self.obstaculos],  # Obstáculos
+            historial=self.hist_pos,                        # Historial de posiciones
+            v_max=self.v_max                                # Velocidad máxima permitida
         )
 
-        # Guardar punto mínimo si el planner lo entrega
+        # Guardar punto mínimo si el planner lo entrega, ojo que se guarda solo en el .json el punto mínimo al obstáculo más cercano, si es que hay más obstáculos
         if reco.get("pos_min_iter") is not None:
             self.min_pos.append((
                 reco["obst_min_id"],
@@ -173,24 +177,24 @@ class SimuladorAPF(QObject):
                 reco["distancia_minima"]
             ))
 
-        # 5) Movimiento según recomendación
-        rumbo_apf = reco["rumbo"]
-        ang       = np.radians(rumbo_apf)
-        vx        = np.cos(ang) * reco["velocidad"]
-        vy        = np.sin(ang) * reco["velocidad"]
+        # 5) Movimiento según recomendación, importante
+        rumbo_apf = reco["rumbo"]               # Rumbo en grados
+        ang       = np.radians(rumbo_apf)       # Convierte a radianes
+        vx        = np.cos(ang) * reco["velocidad"]   # Velocidad en X
+        vy        = np.sin(ang) * reco["velocidad"]   # Velocidad en Y
 
-        # Recorte para NO pasar la meta
+        # para NO pasar la meta
         step_dx  = vx * dt
         step_dy  = vy * dt
-        step_len = np.hypot(step_dx, step_dy)
-        if step_len > dist:
+        step_len = np.hypot(step_dx, step_dy) #longitud del paso que daría el USV
+        if step_len > dist:                     #si el paso es mayor quer la dist. a la meta, se recalcula un paso más corto
             scale   = dist / step_len
-            step_dx *= scale
+            step_dx *= scale    #se reduce proporcional el paso en X e Y
             step_dy *= scale
 
-        self.robot_pos.setX(self.robot_pos.x() + step_dx)
+        self.robot_pos.setX(self.robot_pos.x() + step_dx)  #actualizamos la posición
         self.robot_pos.setY(self.robot_pos.y() + step_dy)
-        self.trayectoria.append((self.robot_pos.x(), self.robot_pos.y()))
+        self.trayectoria.append((self.robot_pos.x(), self.robot_pos.y()))  #guardar la trayectoria
 
         # 6) Chequeo de llegada después de mover
         dist2 = np.hypot(self.goal_pos.x() - self.robot_pos.x(),
@@ -199,7 +203,7 @@ class SimuladorAPF(QObject):
             self.finalizar__llegada()
             return
 
-        # 7) Historial corto
+        # 7) Historial corto 
         self.hist_pos.append((self.robot_pos.x(), self.robot_pos.y()))
         if len(self.hist_pos) > 5:
             self.hist_pos.pop(0)
@@ -213,15 +217,15 @@ class SimuladorAPF(QObject):
         mm = int(secs // 60)
         ss = secs % 60
 
-        # distancia recorrida este paso
+        # distancia del paso actual
         if self._pos_prev is None:
             d_step = 0.0
         else:
             d_step = np.hypot(self.robot_pos.x() - self._pos_prev.x(),
                               self.robot_pos.y() - self._pos_prev.y())
 
-        self.dist_total += d_step
-        maniobra = reco["maniobra"]
+        self.dist_total += d_step  # Suma a distancia total
+        maniobra = reco["maniobra"] # Tipo de maniobra usada
         if maniobra == "AVANCE APF":
             self.dist_apf += d_step
         elif maniobra == "AVANCE PREVENTIVO":
@@ -230,10 +234,10 @@ class SimuladorAPF(QObject):
             self.dist_escape += d_step
             self.n_escape    += 1
 
-        if reco["PMA"] is not None:
+        if reco["PMA"] is not None: #PMA mínimo alcanzado
             self.PMA_min = min(self.PMA_min, reco["PMA"])
 
-        if self._rumbo_prev is not None:
+        if self._rumbo_prev is not None:  # Variación de rumbo
             dpsi = abs(((rumbo_apf - self._rumbo_prev + 180) % 360) - 180)
         else:
             dpsi = 0.0
